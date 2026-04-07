@@ -101,7 +101,7 @@ export default function SettingsPage() {
 
       {/* Version */}
       <p className="text-center text-xs text-gray-300 pb-4">
-        Aseo Alerta v1.0 · Precio de lanzamiento 🚀
+        Aseo Alerta v1.0 · Acceso gratuito de lanzamiento 🚀
       </p>
     </div>
   )
