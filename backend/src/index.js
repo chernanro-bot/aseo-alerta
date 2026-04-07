@@ -16,6 +16,8 @@ app.use(helmet())
 // CORS: solo permitir el frontend autorizado
 const allowedOrigins = [
   process.env.FRONTEND_URL,
+  'https://lighthearted-lolly-9248da.netlify.app',
+  'https://www.aseoalerta.cl',
   'http://localhost:3000',
   'http://localhost:5173',
 ].filter(Boolean)
