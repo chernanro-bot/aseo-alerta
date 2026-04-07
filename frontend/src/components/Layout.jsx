@@ -1,6 +1,6 @@
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { Home, Settings, CreditCard, LogOut } from 'lucide-react'
+import { Home, Settings, Gift, LogOut } from 'lucide-react'
 
 export default function Layout({ session }) {
   const navigate = useNavigate()
@@ -13,7 +13,7 @@ export default function Layout({ session }) {
 
   const navItems = [
     { path: '/dashboard',    icon: Home,       label: 'Inicio' },
-    { path: '/suscripcion',  icon: CreditCard, label: 'Plan' },
+    { path: '/suscripcion',  icon: Gift,       label: 'Plan' },
     { path: '/configuracion',icon: Settings,   label: 'Ajustes' },
   ]
 
