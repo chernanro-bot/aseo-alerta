@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Check, CreditCard, Zap, Shield, Bell, Calendar } from 'lucide-react'
+import { Check, Gift, Zap, Shield, Bell, Calendar, Sparkles, Rocket } from 'lucide-react'
 import { api } from '../lib/api'
 import toast from 'react-hot-toast'
 import Button from '../components/Button'
@@ -12,9 +12,9 @@ const FEATURES = [
   { icon: Shield,   text: 'Soporte prioritario' },
 ]
 
-function ActiveSubscription({ subscription, onCancel, canceling }) {
-  const nextBilling = subscription.current_period_end
-    ? new Date(subscription.current_period_end * 1000).toLocaleDateString('es-CL', {
+function ActivePlan({ subscription }) {
+  const startDate = subscription.started_at
+    ? new Date(subscription.started_at).toLocaleDateString('es-CL', {
         day: 'numeric', month: 'long', year: 'numeric'
       })
     : '—'
@@ -28,84 +28,20 @@ function ActiveSubscription({ subscription, onCancel, canceling }) {
           </div>
           <div>
             <p className="font-bold text-brand-800">Plan activo</p>
-            <p className="text-xs text-brand-600">Precio de lanzamiento</p>
+            <p className="text-xs text-brand-600">Acceso gratuito de lanzamiento</p>
           </div>
         </div>
         <div className="flex items-baseline gap-1 mb-3">
-          <span className="text-3xl font-extrabold text-brand-800">$9.990</span>
-          <span className="text-brand-600 text-sm">/mes</span>
+          <span className="text-3xl font-extrabold text-brand-800">Gratis</span>
+          <span className="text-brand-600 text-sm">por tiempo limitado</span>
         </div>
         <p className="text-xs text-brand-600">
-          Próximo cobro: <strong>{nextBilling}</strong>
+          Activo desde: <strong>{startDate}</strong>
         </p>
       </Card>
 
       <Card className="p-4">
-        <h3 className="font-semibold text-gray-900 mb-3">Estado de tu plan</h3>
-        <div className="space-y-2">
-          {[
-            ['Estado', subscription.status === 'active' ? '✅ Activo' : '⚠️ ' + subscription.status],
-            ['Plan', 'Lanzamiento'],
-            ['Precio', '$9.990 CLP/mes'],
-          ].map(([label, value]) => (
-            <div key={label} className="flex justify-between text-sm">
-              <span className="text-gray-500">{label}</span>
-              <span className="font-medium text-gray-900">{value}</span>
-            </div>
-          ))}
-        </div>
-      </Card>
-
-      <button
-        onClick={onCancel}
-        disabled={canceling}
-        className="w-full text-sm text-red-500 text-center py-2 disabled:opacity-50"
-      >
-        {canceling ? 'Cancelando...' : 'Cancelar suscripción'}
-      </button>
-    </div>
-  )
-}
-
-function CheckoutForm({ onSuccess }) {
-  const [loading, setLoading] = useState(false)
-  const [email, setEmail] = useState('')
-
-  const handleSubscribe = async () => {
-    if (!email) {
-      toast.error('Ingresa tu email de pago')
-      return
-    }
-    setLoading(true)
-    try {
-      const { checkout_url } = await api.subscription.create({ email })
-      if (checkout_url) {
-        window.location.href = checkout_url
-      } else {
-        toast.success('Suscripción activada')
-        onSuccess()
-      }
-    } catch (err) {
-      toast.error(err.message || 'Error al procesar el pago')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  return (
-    <div className="space-y-5">
-      {/* Precio */}
-      <Card className="p-5">
-        <div className="flex items-center justify-between mb-2">
-          <p className="font-bold text-gray-900 text-lg">Plan Lanzamiento</p>
-          <span className="text-xs font-semibold bg-brand-100 text-brand-700 px-2.5 py-1 rounded-full">
-            🎉 Precio especial
-          </span>
-        </div>
-        <div className="flex items-baseline gap-1 mb-4">
-          <span className="text-4xl font-extrabold text-gray-900">$9.990</span>
-          <span className="text-gray-500">/mes</span>
-        </div>
+        <h3 className="font-semibold text-gray-900 mb-3">Tu plan incluye</h3>
         <div className="space-y-2.5">
           {FEATURES.map(({ icon: Icon, text }) => (
             <div key={text} className="flex items-center gap-2.5">
@@ -118,31 +54,76 @@ function CheckoutForm({ onSuccess }) {
         </div>
       </Card>
 
-      {/* Pago */}
+      <Card className="p-4 bg-brand-50 border-brand-100">
+        <div className="flex items-start gap-2.5">
+          <Sparkles size={16} className="text-brand-600 mt-0.5 flex-shrink-0" />
+          <p className="text-xs text-brand-700">
+            Estás entre los primeros usuarios de Aseo Alerta. Disfruta de todas las funciones gratis durante el período de lanzamiento.
+          </p>
+        </div>
+      </Card>
+    </div>
+  )
+}
+
+function ActivateFreePlan({ onSuccess }) {
+  const [loading, setLoading] = useState(false)
+
+  const handleActivate = async () => {
+    setLoading(true)
+    try {
+      await api.subscription.create({ email: '' })
+      toast.success('Plan activado con éxito')
+      onSuccess()
+    } catch (err) {
+      toast.error(err.message || 'Error al activar el plan')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      <Card className="p-5">
+        <div className="flex items-center justify-between mb-2">
+          <p className="font-bold text-gray-900 text-lg">Plan Lanzamiento</p>
+          <span className="text-xs font-semibold bg-green-100 text-green-700 px-2.5 py-1 rounded-full">
+            100% Gratis
+          </span>
+        </div>
+        <div className="flex items-baseline gap-1 mb-1">
+          <span className="text-4xl font-extrabold text-gray-900">$0</span>
+          <span className="text-gray-500">/mes</span>
+        </div>
+        <p className="text-xs text-gray-400 mb-4">
+          <span className="line-through">$9.990/mes</span> — Gratis por tiempo limitado
+        </p>
+        <div className="space-y-2.5">
+          {FEATURES.map(({ icon: Icon, text }) => (
+            <div key={text} className="flex items-center gap-2.5">
+              <div className="w-5 h-5 bg-brand-100 rounded-full flex items-center justify-center flex-shrink-0">
+                <Check size={12} className="text-brand-600" strokeWidth={3} />
+              </div>
+              <span className="text-sm text-gray-700">{text}</span>
+            </div>
+          ))}
+        </div>
+      </Card>
+
       <Card className="p-5 space-y-4">
         <div className="flex items-center gap-2">
-          <CreditCard size={18} className="text-brand-600" />
-          <h3 className="font-bold text-gray-900">Datos de pago</h3>
+          <Gift size={18} className="text-brand-600" />
+          <h3 className="font-bold text-gray-900">Oferta de lanzamiento</h3>
         </div>
-        <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-3.5 text-xs text-yellow-800">
-          <p className="font-semibold mb-1">⚡ Procesado por Toku</p>
-          <p>Pago seguro con tarjeta de crédito o débito. Puedes cancelar cuando quieras.</p>
+        <div className="bg-green-50 border border-green-200 rounded-xl p-3.5 text-xs text-green-800">
+          <p className="font-semibold mb-1">Acceso anticipado gratuito</p>
+          <p>Sé de los primeros en usar Aseo Alerta. Todas las funciones incluidas, sin tarjeta de crédito, sin compromiso.</p>
         </div>
-        <div>
-          <label className="text-sm font-semibold text-gray-700 block mb-1.5">Email de facturación *</label>
-          <input
-            type="email"
-            value={email}
-            onChange={e => setEmail(e.target.value)}
-            placeholder="tu@email.com"
-            className="w-full border border-gray-200 rounded-2xl px-4 py-3.5 text-base focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-brand-500"
-          />
-        </div>
-        <Button onClick={handleSubscribe} loading={loading} fullWidth size="lg">
-          {loading ? 'Procesando...' : 'Suscribirme — $9.990/mes'}
+        <Button onClick={handleActivate} loading={loading} fullWidth size="lg">
+          {loading ? 'Activando...' : 'Activar plan gratis'}
         </Button>
         <p className="text-xs text-center text-gray-400">
-          🔒 Pago 100% seguro · Cancela cuando quieras
+          Sin tarjeta de crédito · Sin compromiso
         </p>
       </Card>
     </div>
@@ -152,7 +133,6 @@ function CheckoutForm({ onSuccess }) {
 export default function SubscriptionPage() {
   const [subscription, setSubscription] = useState(null)
   const [loading, setLoading]           = useState(true)
-  const [canceling, setCanceling]       = useState(false)
 
   const fetchSubscription = async () => {
     try {
@@ -166,20 +146,6 @@ export default function SubscriptionPage() {
   }
 
   useEffect(() => { fetchSubscription() }, [])
-
-  const handleCancel = async () => {
-    if (!window.confirm('¿Seguro que quieres cancelar tu suscripción? Perderás el acceso al finalizar el período.')) return
-    setCanceling(true)
-    try {
-      await api.subscription.cancel()
-      toast.success('Suscripción cancelada')
-      fetchSubscription()
-    } catch (err) {
-      toast.error('Error al cancelar')
-    } finally {
-      setCanceling(false)
-    }
-  }
 
   if (loading) {
     return (
@@ -195,15 +161,15 @@ export default function SubscriptionPage() {
   return (
     <div className="space-y-5">
       <div>
-        <h1 className="text-2xl font-extrabold text-gray-900">Suscripción</h1>
+        <h1 className="text-2xl font-extrabold text-gray-900">Tu Plan</h1>
         <p className="text-sm text-gray-500 mt-0.5">
-          {hasActive ? 'Tu plan está activo' : 'Activa Aseo Alerta para tu propiedad'}
+          {hasActive ? 'Tu plan está activo' : 'Activa Aseo Alerta gratis'}
         </p>
       </div>
 
       {hasActive
-        ? <ActiveSubscription subscription={subscription} onCancel={handleCancel} canceling={canceling} />
-        : <CheckoutForm onSuccess={fetchSubscription} />
+        ? <ActivePlan subscription={subscription} />
+        : <ActivateFreePlan onSuccess={fetchSubscription} />
       }
     </div>
   )
