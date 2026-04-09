@@ -1,12 +1,30 @@
 const ical = require('node-ical')
+const axios = require('axios')
 
 /**
  * Parsea un calendario iCal desde una URL y retorna las reservas.
+ * Usa axios con headers de navegador para evitar bloqueos de Airbnb.
  * @param {string} url - URL del calendario .ics de Airbnb
  * @returns {Array} Lista de reservas { uid, checkin, checkout, guest_name, summary }
  */
 async function parseICalFromUrl(url) {
-  const events = await ical.async.fromURL(url)
+  // Descargar el iCal con headers de navegador (Airbnb bloquea requests sin User-Agent)
+  let events
+  try {
+    const response = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/calendar, text/plain, */*',
+      },
+      timeout: 15000,
+    })
+    events = ical.parseICS(response.data)
+  } catch (fetchError) {
+    console.error('[iCal] Error descargando calendario:', fetchError.message)
+    // Fallback: intentar con node-ical directo
+    events = await ical.async.fromURL(url)
+  }
+
   const reservations = []
 
   for (const [, event] of Object.entries(events)) {
