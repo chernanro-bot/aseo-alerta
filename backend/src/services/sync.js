@@ -1,21 +1,28 @@
 const { supabase } = require('../lib/supabase')
 const { parseICalFromUrl } = require('./ical')
-const { sendWhatsApp, buildNewBookingMessage } = require('./whatsapp')
+const { sendWhatsApp }     = require('./whatsapp')
+const { createNotification, transitionNotification, logMessage } = require('./stateMachine')
+const { notifyOwnerSent, notifyOwnerApprovalRequest } = require('./ownerNotifier')
+const templates = require('./messageTemplates')
 
 /**
  * Sincroniza el calendario iCal de una propiedad.
  * - Parsea las reservas del iCal
  * - Inserta las nuevas en la BD (upsert por uid)
- * - Envía WhatsApp para reservas nuevas detectadas
+ * - Crea notificaciones para reservas nuevas
+ * - Envía WhatsApp según notification_mode (auto/approval)
  *
  * @param {string} propertyId
  * @returns {Object} { added, total }
  */
 async function syncProperty(propertyId) {
-  // Obtener propiedad
+  // Obtener propiedad con cleaner
   const { data: property, error: propError } = await supabase
     .from('properties')
-    .select('*')
+    .select(`
+      *,
+      cleaner:cleaners(id, name, phone)
+    `)
     .eq('id', propertyId)
     .single()
 
@@ -59,41 +66,81 @@ async function syncProperty(propertyId) {
     }
   }
 
-  // Enviar WhatsApp para reservas nuevas (si tiene teléfono configurado)
-  if (newReservations.length > 0 && property.whatsapp_phone) {
+  // ─── NUEVO: Crear notificaciones para reservas nuevas ───────────────────
+  if (newReservations.length > 0 && property.cleaner) {
     for (const res of newReservations) {
       try {
-        const message = buildNewBookingMessage({
-          propertyName: property.name,
-          checkin:      res.checkin,
-          checkout:     res.checkout,
-          guestName:    res.guest_name,
+        // Obtener la reserva insertada (necesitamos el ID de BD)
+        const { data: dbReservation } = await supabase
+          .from('reservations')
+          .select('id')
+          .eq('uid', res.uid)
+          .eq('property_id', propertyId)
+          .single()
+
+        if (!dbReservation) continue
+
+        // Verificar si ya existe una notificación para esta reserva
+        const { data: existingNotif } = await supabase
+          .from('notifications')
+          .select('id')
+          .eq('reservation_id', dbReservation.id)
+          .eq('type', 'new_reservation')
+          .limit(1)
+
+        if (existingNotif?.length > 0) {
+          console.log(`[Sync] Notificación ya existe para reserva ${res.uid}`)
+          continue
+        }
+
+        // Determinar estado inicial según notification_mode
+        const initialStatus = property.notification_mode === 'auto'
+          ? 'pending_notification'
+          : 'pending_approval'
+
+        // Crear notificación
+        const notification = await createNotification({
+          propertyId:    propertyId,
+          reservationId: dbReservation.id,
+          cleanerId:     property.cleaner.id,
+          type:          'new_reservation',
+          status:        initialStatus,
         })
 
-        await sendWhatsApp(property.whatsapp_phone, message)
-
-        // Registrar alerta enviada
-        await supabase.from('alerts').insert({
-          property_id:    propertyId,
-          type:           'new_booking',
-          status:         'sent',
-          message:        message,
-          whatsapp_to:    property.whatsapp_phone,
-          sent_at:        new Date().toISOString(),
-        })
-
-        console.log(`[Sync] WhatsApp enviado para reserva ${res.uid}`)
+        if (property.notification_mode === 'auto') {
+          // Modo auto: enviar inmediatamente
+          await sendCleanerNotification(notification, property, res)
+        } else {
+          // Modo approval: avisar al owner para que apruebe
+          await notifyOwnerApprovalRequest(notification.id)
+          console.log(`[Sync] Solicitud de aprobación creada para ${property.name}`)
+        }
       } catch (err) {
-        console.error(`[Sync] Error enviando WhatsApp para ${res.uid}:`, err.message)
+        console.error(`[Sync] Error procesando reserva ${res.uid}:`, err.message)
+      }
+    }
+  } else if (newReservations.length > 0 && !property.cleaner) {
+    console.log(`[Sync] ${property.name} tiene reservas nuevas pero no tiene cleaner asignado`)
 
-        // Registrar error
-        await supabase.from('alerts').insert({
-          property_id:  propertyId,
-          type:         'new_booking',
-          status:       'error',
-          error_msg:    err.message,
-          whatsapp_to:  property.whatsapp_phone,
-        })
+    // Fallback: enviar alerta al viejo sistema si hay whatsapp_phone
+    if (property.whatsapp_phone) {
+      for (const res of newReservations) {
+        try {
+          const message = templates.buildCleanerNewReservation({
+            propertyName: property.name,
+            ownerName:    'Aseo Alerta',
+            checkinDate:  templates.formatDate(res.checkin),
+            checkinTime:  property.checkin_time,
+            checkoutDate: templates.formatDate(res.checkout),
+            checkoutTime: property.checkout_time,
+            guestName:    res.guest_name,
+          })
+
+          await sendWhatsApp(property.whatsapp_phone, message)
+          console.log(`[Sync] WhatsApp enviado (fallback) para reserva ${res.uid}`)
+        } catch (err) {
+          console.error(`[Sync] Error enviando WhatsApp fallback:`, err.message)
+        }
       }
     }
   }
@@ -111,6 +158,43 @@ async function syncProperty(propertyId) {
     total:        parsed.length,
     newBookings:  newReservations,
   }
+}
+
+/**
+ * Enviar mensaje de notificación al cleaner y transicionar a 'notified'
+ */
+async function sendCleanerNotification(notification, property, reservation) {
+  const message = templates.buildCleanerNewReservation({
+    propertyName: property.name,
+    ownerName:    'el dueño',
+    checkinDate:  templates.formatDate(reservation.checkin),
+    checkinTime:  property.checkin_time,
+    checkoutDate: templates.formatDate(reservation.checkout),
+    checkoutTime: property.checkout_time,
+    guestName:    reservation.guest_name,
+  })
+
+  const result = await sendWhatsApp(property.cleaner.phone, message)
+
+  // Registrar en messages_log
+  await logMessage({
+    notificationId: notification.id,
+    kapsoMessageId: result?.messages?.[0]?.id || null,
+    direction:      'outbound',
+    content:        message,
+    phoneTo:        property.cleaner.phone,
+    status:         'queued',
+  })
+
+  // Transicionar a 'notified'
+  await transitionNotification(notification.id, 'notified', {
+    message_text: message,
+  })
+
+  // Avisar al owner que se envió
+  await notifyOwnerSent(notification.id)
+
+  console.log(`[Sync] ✅ Notificación enviada a ${property.cleaner.name} para ${property.name}`)
 }
 
 module.exports = { syncProperty }

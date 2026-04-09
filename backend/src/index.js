@@ -16,8 +16,9 @@ app.use(helmet())
 // CORS: solo permitir el frontend autorizado
 const allowedOrigins = [
   process.env.FRONTEND_URL,
-  'https://lighthearted-lolly-9248da.netlify.app',
+  'https://aseoalerta.cl',
   'https://www.aseoalerta.cl',
+  'https://lighthearted-lolly-9248da.netlify.app',
   'http://localhost:3000',
   'http://localhost:5173',
 ].filter(Boolean)
@@ -27,10 +28,13 @@ app.use(cors({
     if (!origin || allowedOrigins.includes(origin)) {
       callback(null, true)
     } else {
-      callback(new Error(`CORS: origen no permitido → ${origin}`))
+      console.warn(`[CORS] Origen no permitido: ${origin}`)
+      callback(null, false)
     }
   },
   credentials: true,
+  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
 }))
 
 // Rate limiting global: 100 req/15min por IP
@@ -52,20 +56,39 @@ const syncLimiter = rateLimit({
 app.use('/api/properties/:id/sync', syncLimiter)
 
 // ─── Body parsers ─────────────────────────────────────────────────────────────
-// Nota: el webhook de Toku necesita raw body, por eso va antes del json()
+// Webhooks necesitan raw body para verificación de firma HMAC
 app.use('/api/subscription/webhook', express.raw({ type: 'application/json' }))
+app.use('/api/webhook/whatsapp', (req, res, next) => {
+  // Guardar raw body para verificación de firma Kapso
+  let rawBody = ''
+  req.on('data', (chunk) => { rawBody += chunk })
+  req.on('end', () => {
+    req.rawBody = rawBody
+    try {
+      req.body = JSON.parse(rawBody)
+    } catch (e) {
+      req.body = rawBody
+    }
+    next()
+  })
+})
 app.use(express.json({ limit: '1mb' }))
 app.use(express.urlencoded({ extended: false }))
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
-app.use('/api/properties',   require('./routes/properties'))
-app.use('/api/subscription', require('./routes/subscription'))
+app.use('/api/properties',     require('./routes/properties'))
+app.use('/api/subscription',   require('./routes/subscription'))
+app.use('/api/cleaners',       require('./routes/cleaners'))
+app.use('/api/notifications',  require('./routes/notifications'))
+app.use('/api/dashboard',      require('./routes/dashboard'))
+app.use('/api/webhook/whatsapp', require('./routes/webhookWhatsapp'))
 
 // Health check
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     service: 'aseo-alerta-api',
+    version: '2.0.0',
     timestamp: new Date().toISOString(),
     env: process.env.NODE_ENV || 'development',
   })
@@ -87,12 +110,14 @@ app.use((err, req, res, _next) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`
-🧹 Aseo Alerta API iniciada
-─────────────────────────────
-🌐 Puerto:   ${PORT}
-📦 Entorno:  ${process.env.NODE_ENV || 'development'}
-🔗 Health:   http://localhost:${PORT}/health
-─────────────────────────────
+🧹 Aseo Alerta API v2.0 — WhatsApp Coordination
+─────────────────────────────────────────────────
+🌐 Puerto:     ${PORT}
+📦 Entorno:    ${process.env.NODE_ENV || 'development'}
+🔗 Health:     http://localhost:${PORT}/health
+📱 WhatsApp:   Kapso (${process.env.KAPSO_PHONE_ID ? '✅ configurado' : '⚠️ no configurado'})
+🔔 Webhooks:   /api/webhook/whatsapp
+─────────────────────────────────────────────────
   `)
 
   // Iniciar cron jobs (solo en producción o si están habilitados)

@@ -17,7 +17,8 @@ router.get('/', async (req, res) => {
       .from('properties')
       .select(`
         *,
-        reservations(checkout)
+        reservations(checkout),
+        cleaner:cleaners(id, name, phone)
       `)
       .eq('user_id', req.user.id)
       .order('created_at', { ascending: false })
@@ -70,23 +71,47 @@ router.get('/:id', async (req, res) => {
  * Crea una nueva propiedad.
  */
 router.post('/', async (req, res) => {
-  const { name, ical_url, whatsapp_phone } = req.body
+  const {
+    name, ical_url, whatsapp_phone,
+    notify_on_reservation, notify_before_checkout,
+    cleaner_id, notification_mode, checkout_time, checkin_time, owner_phone
+  } = req.body
 
   if (!name?.trim())         return res.status(400).json({ error: 'El nombre es obligatorio' })
   if (!ical_url?.trim())     return res.status(400).json({ error: 'La URL del calendario es obligatoria' })
-  if (!whatsapp_phone?.trim()) return res.status(400).json({ error: 'El teléfono de WhatsApp es obligatorio' })
   if (!ical_url.startsWith('http')) return res.status(400).json({ error: 'URL de calendario inválida' })
 
+  // Validar cleaner_id si se proporciona
+  if (cleaner_id) {
+    const { data: cleaner } = await supabase
+      .from('cleaners')
+      .select('id')
+      .eq('id', cleaner_id)
+      .eq('user_id', req.user.id)
+      .single()
+    if (!cleaner) return res.status(400).json({ error: 'Contacto de limpieza no encontrado' })
+  }
+
   try {
+    const insertData = {
+      user_id:                req.user.id,
+      name:                   name.trim(),
+      ical_url:               ical_url.trim(),
+      active:                 true,
+      notify_on_reservation:  notify_on_reservation !== false,
+      notify_before_checkout: notify_before_checkout !== false,
+    }
+    // Campos opcionales
+    if (whatsapp_phone?.trim()) insertData.whatsapp_phone    = whatsapp_phone.trim()
+    if (cleaner_id)             insertData.cleaner_id        = cleaner_id
+    if (notification_mode)      insertData.notification_mode = notification_mode
+    if (checkout_time)          insertData.checkout_time     = checkout_time
+    if (checkin_time)           insertData.checkin_time      = checkin_time
+    if (owner_phone?.trim())    insertData.owner_phone       = owner_phone.trim()
+
     const { data, error } = await supabase
       .from('properties')
-      .insert({
-        user_id:        req.user.id,
-        name:           name.trim(),
-        ical_url:       ical_url.trim(),
-        whatsapp_phone: whatsapp_phone.trim(),
-        active:         true,
-      })
+      .insert(insertData)
       .select()
       .single()
 
@@ -109,7 +134,11 @@ router.post('/', async (req, res) => {
  * Actualiza una propiedad.
  */
 router.patch('/:id', async (req, res) => {
-  const { name, ical_url, whatsapp_phone, active } = req.body
+  const {
+    name, ical_url, whatsapp_phone, active,
+    notify_on_reservation, notify_before_checkout,
+    cleaner_id, notification_mode, checkout_time, checkin_time, owner_phone
+  } = req.body
 
   // Verificar que la propiedad pertenece al usuario
   const { data: existing } = await supabase
@@ -121,11 +150,29 @@ router.patch('/:id', async (req, res) => {
 
   if (!existing) return res.status(404).json({ error: 'Propiedad no encontrada' })
 
+  // Validar cleaner_id si se proporciona
+  if (cleaner_id) {
+    const { data: cleaner } = await supabase
+      .from('cleaners')
+      .select('id')
+      .eq('id', cleaner_id)
+      .eq('user_id', req.user.id)
+      .single()
+    if (!cleaner) return res.status(400).json({ error: 'Contacto de limpieza no encontrado' })
+  }
+
   const updates = {}
-  if (name !== undefined)           updates.name           = name.trim()
-  if (ical_url !== undefined)       updates.ical_url       = ical_url.trim()
-  if (whatsapp_phone !== undefined) updates.whatsapp_phone = whatsapp_phone.trim()
-  if (active !== undefined)         updates.active         = active
+  if (name !== undefined)                   updates.name                   = name.trim()
+  if (ical_url !== undefined)               updates.ical_url               = ical_url.trim()
+  if (whatsapp_phone !== undefined)         updates.whatsapp_phone         = whatsapp_phone.trim()
+  if (active !== undefined)                 updates.active                 = active
+  if (notify_on_reservation !== undefined)  updates.notify_on_reservation  = notify_on_reservation
+  if (notify_before_checkout !== undefined) updates.notify_before_checkout = notify_before_checkout
+  if (cleaner_id !== undefined)             updates.cleaner_id             = cleaner_id || null
+  if (notification_mode !== undefined)      updates.notification_mode      = notification_mode
+  if (checkout_time !== undefined)          updates.checkout_time          = checkout_time
+  if (checkin_time !== undefined)           updates.checkin_time           = checkin_time
+  if (owner_phone !== undefined)            updates.owner_phone            = owner_phone?.trim() || null
 
   try {
     const { data, error } = await supabase
@@ -216,7 +263,37 @@ router.get('/:id/reservations', async (req, res) => {
 })
 
 /**
+ * GET /api/properties/:id/notifications
+ * Listar notificaciones de una propiedad.
+ */
+router.get('/:id/notifications', async (req, res) => {
+  const { data: prop } = await supabase
+    .from('properties')
+    .select('id')
+    .eq('id', req.params.id)
+    .eq('user_id', req.user.id)
+    .single()
+
+  if (!prop) return res.status(404).json({ error: 'Propiedad no encontrada' })
+
+  const { data, error } = await supabase
+    .from('notifications')
+    .select(`
+      *,
+      reservation:reservations(id, checkin, checkout, guest_name),
+      cleaner:cleaners(id, name, phone)
+    `)
+    .eq('property_id', req.params.id)
+    .order('created_at', { ascending: false })
+    .limit(50)
+
+  if (error) return res.status(500).json({ error: 'Error al obtener notificaciones' })
+  res.json(data || [])
+})
+
+/**
  * GET /api/properties/:id/alerts
+ * DEPRECADO — usar /:id/notifications
  */
 router.get('/:id/alerts', async (req, res) => {
   const { data: prop } = await supabase

@@ -1,7 +1,11 @@
 const cron  = require('node-cron')
-const { supabase }  = require('../lib/supabase')
+const { supabase }     = require('../lib/supabase')
 const { syncProperty } = require('./sync')
-const { sendWhatsApp, buildPreCheckoutMessage } = require('./whatsapp')
+const { sendWhatsApp }       = require('./whatsapp')
+const { createNotification, transitionNotification, logMessage } = require('./stateMachine')
+const { notifyOwnerSent, notifyOwnerApprovalRequest } = require('./ownerNotifier')
+const { checkEscalations, checkReEscalations, cleanupStaleNotifications } = require('./escalation')
+const templates = require('./messageTemplates')
 
 /**
  * CRON JOB 1: Sincronización diaria de todos los calendarios
@@ -46,13 +50,13 @@ function startDailySyncJob() {
 /**
  * CRON JOB 2: Alertas de pre-checkout
  * Se ejecuta cada día a las 09:00 AM (hora Chile)
- * Detecta checkouts del día SIGUIENTE y envía WhatsApp
+ * Detecta checkouts del día SIGUIENTE y envía WhatsApp al cleaner.
+ * Usa el nuevo sistema de notifications.
  */
 function startPreCheckoutAlertJob() {
   cron.schedule('0 12 * * *', async () => {
     console.log('[Cron] Iniciando job de alertas pre-checkout...')
     try {
-      // Calcular rango: mañana (en hora Chile)
       const tomorrow = new Date()
       tomorrow.setDate(tomorrow.getDate() + 1)
       const tomorrowStart = new Date(tomorrow)
@@ -65,7 +69,11 @@ function startPreCheckoutAlertJob() {
         .from('reservations')
         .select(`
           *,
-          property:properties(id, name, whatsapp_phone, active)
+          property:properties(
+            id, name, active, notification_mode, checkout_time, checkin_time,
+            owner_phone, cleaner_id,
+            cleaner:cleaners(id, name, phone)
+          )
         `)
         .gte('checkout', tomorrowStart.toISOString())
         .lte('checkout', tomorrowEnd.toISOString())
@@ -80,56 +88,85 @@ function startPreCheckoutAlertJob() {
 
       for (const res of reservations) {
         const property = res.property
-        if (!property?.active)        continue
-        if (!property.whatsapp_phone) continue
+        if (!property?.active) continue
+        if (!property.cleaner) {
+          console.log(`[Cron] ${property.name}: sin cleaner asignado, saltando`)
+          continue
+        }
 
-        // Verificar si ya se envió alerta para esta reserva
-        const { data: existingAlert } = await supabase
-          .from('alerts')
+        // Verificar si ya se envió notificación pre-checkout para esta reserva
+        const { data: existingNotif } = await supabase
+          .from('notifications')
           .select('id')
           .eq('reservation_id', res.id)
-          .eq('type', 'pre_checkout')
-          .eq('status', 'sent')
-          .single()
+          .eq('type', 'pre_checkout_reminder')
+          .limit(1)
 
-        if (existingAlert) {
-          console.log(`[Cron] Alerta ya enviada para reserva ${res.id}`)
+        if (existingNotif?.length > 0) {
+          console.log(`[Cron] Notificación pre-checkout ya existe para reserva ${res.id}`)
           continue
         }
 
         try {
-          const message = buildPreCheckoutMessage({
-            propertyName: property.name,
-            checkout:     res.checkout,
-            guestName:    res.guest_name,
-            checkoutTime: '11:00',
+          // Buscar próximo checkin
+          const { data: nextReservation } = await supabase
+            .from('reservations')
+            .select('checkin')
+            .eq('property_id', property.id)
+            .gt('checkin', res.checkout)
+            .order('checkin', { ascending: true })
+            .limit(1)
+            .single()
+
+          const initialStatus = property.notification_mode === 'auto'
+            ? 'pending_notification'
+            : 'pending_approval'
+
+          // Crear notificación
+          const notification = await createNotification({
+            propertyId:    property.id,
+            reservationId: res.id,
+            cleanerId:     property.cleaner.id,
+            type:          'pre_checkout_reminder',
+            status:        initialStatus,
           })
 
-          await sendWhatsApp(property.whatsapp_phone, message)
+          if (property.notification_mode === 'auto') {
+            // Enviar directamente al cleaner
+            const message = templates.buildCleanerPreCheckout({
+              propertyName:    property.name,
+              ownerName:       'el dueño',
+              checkoutDate:    templates.formatDate(res.checkout),
+              checkoutTime:    property.checkout_time,
+              guestName:       res.guest_name,
+              nextCheckinDate: nextReservation ? templates.formatDate(nextReservation.checkin) : null,
+              nextCheckinTime: property.checkin_time,
+            })
 
-          // Registrar alerta
-          await supabase.from('alerts').insert({
-            property_id:    property.id,
-            reservation_id: res.id,
-            type:           'pre_checkout',
-            status:         'sent',
-            message:        message,
-            whatsapp_to:    property.whatsapp_phone,
-            sent_at:        new Date().toISOString(),
-          })
+            const result = await sendWhatsApp(property.cleaner.phone, message)
 
-          console.log(`[Cron] ✅ Alerta pre-checkout enviada para ${property.name}`)
+            await logMessage({
+              notificationId: notification.id,
+              kapsoMessageId: result?.messages?.[0]?.id || null,
+              direction:      'outbound',
+              content:        message,
+              phoneTo:        property.cleaner.phone,
+              status:         'queued',
+            })
+
+            await transitionNotification(notification.id, 'notified', {
+              message_text: message,
+            })
+
+            await notifyOwnerSent(notification.id)
+            console.log(`[Cron] ✅ Pre-checkout enviado a ${property.cleaner.name} para ${property.name}`)
+          } else {
+            // Modo approval: pedir aprobación al owner
+            await notifyOwnerApprovalRequest(notification.id)
+            console.log(`[Cron] Solicitud de aprobación pre-checkout para ${property.name}`)
+          }
         } catch (err) {
-          console.error(`[Cron] ❌ Error enviando alerta para ${property.name}:`, err.message)
-
-          await supabase.from('alerts').insert({
-            property_id:    property.id,
-            reservation_id: res.id,
-            type:           'pre_checkout',
-            status:         'error',
-            error_msg:      err.message,
-            whatsapp_to:    property.whatsapp_phone,
-          })
+          console.error(`[Cron] ❌ Error en pre-checkout para ${property.name}:`, err.message)
         }
       }
 
@@ -142,9 +179,60 @@ function startPreCheckoutAlertJob() {
   console.log('[Cron] Job de alertas pre-checkout registrado (09:00 AM Chile)')
 }
 
+/**
+ * CRON JOB 3: Verificación de escalaciones
+ * Cada 30 minutos — busca notificaciones sin respuesta después de 2h
+ */
+function startEscalationCheckerJob() {
+  cron.schedule('*/30 * * * *', async () => {
+    try {
+      await checkEscalations()
+    } catch (err) {
+      console.error('[Cron] Error en escalation checker:', err.message)
+    }
+  }, { timezone: 'America/Santiago' })
+
+  console.log('[Cron] Job de escalación registrado (cada 30 min)')
+}
+
+/**
+ * CRON JOB 4: Re-escalación
+ * Cada 4 horas — reenvía recordatorio de escalación
+ */
+function startReEscalationJob() {
+  cron.schedule('0 */4 * * *', async () => {
+    try {
+      await checkReEscalations()
+    } catch (err) {
+      console.error('[Cron] Error en re-escalation:', err.message)
+    }
+  }, { timezone: 'America/Santiago' })
+
+  console.log('[Cron] Job de re-escalación registrado (cada 4h)')
+}
+
+/**
+ * CRON JOB 5: Limpieza de notificaciones vencidas
+ * Cada día a las 00:00 Chile — auto-resuelve notificaciones con checkout pasado
+ */
+function startStaleCleanupJob() {
+  cron.schedule('0 3 * * *', async () => {
+    try {
+      await cleanupStaleNotifications()
+    } catch (err) {
+      console.error('[Cron] Error en stale cleanup:', err.message)
+    }
+  }, { timezone: 'America/Santiago' })
+
+  console.log('[Cron] Job de limpieza nocturna registrado (00:00 Chile)')
+}
+
 function startAllCronJobs() {
   startDailySyncJob()
   startPreCheckoutAlertJob()
+  startEscalationCheckerJob()
+  startReEscalationJob()
+  startStaleCleanupJob()
   console.log('[Cron] Todos los jobs iniciados ✅')
 }
 
