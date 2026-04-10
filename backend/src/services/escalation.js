@@ -1,10 +1,13 @@
 const { supabase } = require('../lib/supabase')
-const { transitionNotification } = require('./stateMachine')
-const { notifyOwnerEscalation }  = require('./ownerNotifier')
+const { transitionNotification, logMessage } = require('./stateMachine')
+const { notifyOwnerEscalation, notifyOwnerSent, getNotificationContext } = require('./ownerNotifier')
+const { sendWhatsApp } = require('./whatsapp')
+const templates = require('./messageTemplates')
 
 /**
  * Servicio de escalación automática.
  * Detecta notificaciones sin respuesta y escala al dueño.
+ * También procesa notificaciones pendientes de envío.
  */
 
 /**
@@ -170,8 +173,104 @@ async function cleanupStaleNotifications() {
   }
 }
 
+/**
+ * Procesar notificaciones en estado 'pending_notification' que no se enviaron.
+ * Esto cubre casos donde el sync falló al enviar, o se insertaron manualmente.
+ * Llamado por el cron cada 30 minutos junto con checkEscalations.
+ */
+async function processPendingNotifications() {
+  console.log('[Escalation] Procesando notificaciones pendientes de envío...')
+
+  try {
+    const { data: pendingNotifs, error } = await supabase
+      .from('notifications')
+      .select(`
+        id, status, type,
+        property:properties(id, name, owner_phone, checkout_time, checkin_time),
+        reservation:reservations(id, checkin, checkout, guest_name),
+        cleaner:cleaners(id, name, phone)
+      `)
+      .eq('status', 'pending_notification')
+
+    if (error) throw error
+    if (!pendingNotifs?.length) {
+      console.log('[Escalation] Sin notificaciones pendientes de envío')
+      return { sent: 0 }
+    }
+
+    console.log(`[Escalation] ${pendingNotifs.length} notificación(es) pendientes de envío`)
+
+    let sent = 0
+    for (const notif of pendingNotifs) {
+      try {
+        if (!notif.cleaner?.phone) {
+          console.warn(`[Escalation] Notificación ${notif.id} sin cleaner/phone, saltando`)
+          continue
+        }
+
+        // Construir mensaje según tipo
+        let message
+        if (notif.type === 'pre_checkout_reminder') {
+          message = templates.buildCleanerPreCheckout({
+            propertyName:    notif.property.name,
+            ownerName:       'el dueño',
+            checkoutDate:    templates.formatDate(notif.reservation.checkout),
+            checkoutTime:    notif.property.checkout_time,
+            guestName:       notif.reservation.guest_name,
+            nextCheckinDate: null,
+            nextCheckinTime: notif.property.checkin_time,
+          })
+        } else {
+          message = templates.buildCleanerNewReservation({
+            propertyName: notif.property.name,
+            ownerName:    'el dueño',
+            checkinDate:  templates.formatDate(notif.reservation.checkin),
+            checkinTime:  notif.property.checkin_time,
+            checkoutDate: templates.formatDate(notif.reservation.checkout),
+            checkoutTime: notif.property.checkout_time,
+            guestName:    notif.reservation.guest_name,
+          })
+        }
+
+        // Enviar WhatsApp
+        const result = await sendWhatsApp(notif.cleaner.phone, message)
+
+        // Registrar mensaje
+        await logMessage({
+          notificationId: notif.id,
+          kapsoMessageId: result?.messages?.[0]?.id || null,
+          direction:      'outbound',
+          content:        message,
+          phoneTo:        notif.cleaner.phone,
+          status:         'queued',
+        })
+
+        // Transicionar a 'notified'
+        await transitionNotification(notif.id, 'notified', {
+          message_text: message,
+        })
+
+        // Avisar al owner
+        await notifyOwnerSent(notif.id)
+
+        sent++
+        console.log(`[Escalation] ✅ Notificación enviada a ${notif.cleaner.name} para ${notif.property.name}`)
+      } catch (err) {
+        console.error(`[Escalation] ❌ Error enviando notificación ${notif.id}:`, err.message)
+      }
+    }
+
+    console.log(`[Escalation] Completado: ${sent}/${pendingNotifs.length} enviadas`)
+    return { sent }
+  } catch (err) {
+    console.error('[Escalation] Error procesando pendientes:', err.message)
+    return { sent: 0, error: err.message }
+  }
+}
+
 module.exports = {
   checkEscalations,
   checkReEscalations,
   cleanupStaleNotifications,
+  processPendingNotifications,
 }

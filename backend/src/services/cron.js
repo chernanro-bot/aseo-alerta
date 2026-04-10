@@ -4,7 +4,7 @@ const { syncProperty } = require('./sync')
 const { sendWhatsApp }       = require('./whatsapp')
 const { createNotification, transitionNotification, logMessage } = require('./stateMachine')
 const { notifyOwnerSent, notifyOwnerApprovalRequest } = require('./ownerNotifier')
-const { checkEscalations, checkReEscalations, cleanupStaleNotifications } = require('./escalation')
+const { checkEscalations, checkReEscalations, cleanupStaleNotifications, processPendingNotifications } = require('./escalation')
 const templates = require('./messageTemplates')
 
 /**
@@ -186,6 +186,9 @@ function startPreCheckoutAlertJob() {
 function startEscalationCheckerJob() {
   cron.schedule('*/30 * * * *', async () => {
     try {
+      // Primero: procesar notificaciones pendientes de envío
+      await processPendingNotifications()
+      // Luego: verificar escalaciones
       await checkEscalations()
     } catch (err) {
       console.error('[Cron] Error en escalation checker:', err.message)
